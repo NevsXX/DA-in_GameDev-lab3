@@ -109,10 +109,243 @@ for level in range(1, 11):
 ## - Задание 2. Создайте 10 сцен на Unity с изменяющимся уровнем сложности.
 - Создаю 10 сцен для дальнейшей работы с ними ![image](https://github.com/user-attachments/assets/8f105edf-cfb3-44c5-98ea-280fd3fcba15)
 Далее:
+Я создаю пустой объект на сцене и добавляю к нему компонент-загрузчик, который:
 
+    - Берет настройки баланса из гугл-таблицы
+    - Хранит параметры уровня (скорость, время падения яиц и т.д.)
+    - Выбирает нужные значения по указанному в инспекторе номеру уровня
+
+После загрузки данных я вызываю событие OnDataLoaded. Это нужно, чтобы:
+    - Дать время на загрузку из интернета
+    - Убедиться, что данные точно готовы
+    - Безопасно обновить игровые параметры
+
+Другие системы подписываются на это событие и применяют настройки, когда всё загружено. Так я избегаю проблем с асинхронной загрузкой.
+
+```C#
+using System;
+using System.Collections;
+using UnityEngine;
+using UnityEngine.Networking;
+using SimpleJSON;
+using System.Globalization;
+
+[System.Serializable]
+public class GameSettings
+{
+    public float dragonSpeed;
+    public float eggDropTime;
+    public float mass;
+    public int shieldCount;
+}
+
+public class SettingsLoader : MonoBehaviour
+{
+    private const string SPREADSHEET_ID = "1HUsx9fzS2M9skJoMe7ZKUz6IdCQrU7kIMfhz5zumE4M";
+    private const string API_KEY = "AIzaSyAY025NahCQGwDFeFa7uJYgIBuRut70nVs";
+    private const string SHEET_NAME = "Лист1";
+
+    [SerializeField] private int _targetLevel;
+    private GameSettings _currentSettings = new GameSettings();
+
+    public GameSettings CurrentSettings => _currentSettings;
+    public event Action OnSettingsLoaded;
+
+    private void Start()
+    {
+        StartCoroutine(LoadSettingsFromGoogleSheets());
+    }
+
+    private IEnumerator LoadSettingsFromGoogleSheets()
+    {
+        string url = $"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}?key={API_KEY}";
+        
+        using (UnityWebRequest request = UnityWebRequest.Get(url))
+        {
+            yield return request.SendWebRequest();
+
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                Debug.LogError($"Failed to load settings: {request.error}");
+                yield break;
+            }
+
+            ProcessResponse(request.downloadHandler.text);
+        }
+
+        OnSettingsLoaded?.Invoke();
+    }
+
+    private void ProcessResponse(string jsonResponse)
+    {
+        var parsedData = JSON.Parse(jsonResponse);
+        var valuesArray = parsedData["values"].AsArray;
+
+        for (int i = 1; i < valuesArray.Count; i++) // Skip header row
+        {
+            var row = valuesArray[i].AsArray;
+            
+            if (row.Count < 4) continue;
+
+            if (int.TryParse(row[0], out int level) && level == _targetLevel)
+            {
+                _currentSettings.dragonSpeed = ParseFloat(row[1]);
+                _currentSettings.eggDropTime = ParseFloat(row[2]);
+                _currentSettings.shieldCount = ParseInt(row[3]);
+                
+                Debug.Log($"Level {level} settings loaded: " +
+                         $"Speed={_currentSettings.dragonSpeed}, " +
+                         $"EggDrop={_currentSettings.eggDropTime}, " +
+                         $"Shields={_currentSettings.shieldCount}");
+                break;
+            }
+        }
+    }
+
+    private float ParseFloat(string value)
+    {
+        return float.Parse(value.Replace(',', '.'), CultureInfo.InvariantCulture);
+    }
+
+    private int ParseInt(string value)
+    {
+        return int.Parse(value);
+    }
+}
+```
+Далее находим скрипты дракона и сферы для дальнейших действий:
+![image](https://github.com/user-attachments/assets/c4ccc444-ef79-43d0-9262-af01efa22a97)
+
+Создаем обработчик события для обновления нужных параметров (дракон):
+```C#
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+
+public class DragonPicker : MonoBehaviour
+{
+    [SerializeField] private LoadSettings _settings;
+    public GameObject energyShieldPrefab;
+    public int numEnergyShield;
+    public float energyShieldBottomY = -6f;
+    public float energyShieldRadius = 1.5f;
+    
+    public List<GameObject> shieldList;
+
+    private void OnEnable()
+    {
+        _settings.CoroutineIsStopped += UpdateShield;
+    }
+
+    void CreateShield()
+    {
+        shieldList = new List<GameObject>();
+
+        for (int i = 1; i <= numEnergyShield; i++)
+        {
+            GameObject tShieldGo = Instantiate<GameObject>(energyShieldPrefab);
+            tShieldGo.transform.position = new Vector3(0, energyShieldBottomY, 0);
+            tShieldGo.transform.localScale = new Vector3(1 * i, 1 * i, 1 * i);
+            shieldList.Add(tShieldGo);
+        }
+    }
+
+    private void UpdateShield()
+    {
+        numEnergyShield = _settings.CountShield;
+        CreateShield();
+    }
+
+    public void DragonEggDestroyed(){
+        GameObject[] tDragonEggArray = GameObject.FindGameObjectsWithTag("Dragon Egg");
+        foreach (GameObject tGO in tDragonEggArray){
+            Destroy(tGO);
+        }
+        int shieldIndex = shieldList.Count - 1;
+        GameObject tShieldGo = shieldList[shieldIndex];
+        shieldList.RemoveAt(shieldIndex);
+        Destroy(tShieldGo);
+
+        if (shieldList.Count == 0){
+            SceneManager.LoadScene("_0Scene");
+        }
+    }
+}
+```
+Создаем обработчик события для обновления нужных параметров (сфера):
+```C#
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class EnemyDragon : MonoBehaviour
+{
+    public GameObject dragonEggPrefab;
+    [SerializeField] private LoadSettings _settings;
+    public float speed;
+    public float timeBetweenEggDrops;
+    public float leftRightDistance = 10f;
+    public float chanceDirection = 0.1f;
+
+    private void OnEnable()
+    {
+        _settings.CoroutineIsStopped += UpdateFields;
+    }
+
+
+    void Start()
+    {
+        Invoke("DropEgg", 2f);
+    }
+
+    private void UpdateFields()
+    {
+        speed = _settings.DragonSpeed;
+        //Debug.Log(speed);
+        timeBetweenEggDrops = _settings.TimeEggDrop;
+        //Debug.Log(timeBetweenEggDrops);
+    }
+
+    void DropEgg(){
+        Vector3 myVector = new Vector3(0.0f, 5.0f, 0.0f);
+        GameObject egg = Instantiate<GameObject>(dragonEggPrefab);
+        egg.transform.position = transform.position + myVector;
+        Invoke("DropEgg", timeBetweenEggDrops);
+    }
+
+    // Update is called once per frame
+    void Update()
+    {
+        Vector3 pos = transform.position;
+        pos.x += speed * Time.deltaTime;
+        transform.position = pos;
+
+        if (pos.x < -leftRightDistance){
+            speed = Mathf.Abs(speed);
+        }
+        else if (pos.x > leftRightDistance){
+            speed = -Mathf.Abs(speed);
+        }
+    }
+
+    private void FixedUpdate() {
+        if (Random.value < chanceDirection){
+            speed *= -1;
+        }
+    }
+}
+```
+
+Теперь даем каждому объекту ссылку на необходимый скрипт: 
+
+- ![image](https://github.com/user-attachments/assets/6b6c2363-7b30-46ba-ab78-adfa504b2fae)
+
+Делаем так с каждой и получаем: 
+![image](https://github.com/user-attachments/assets/f3852a2d-38f2-4784-9f09-866dd07d615a)
 
 ## Выводы
-
+Я освоил работу с балансом игры: научился настраивать параметры, визуализировать изменения, рассчитывать сложность и внедрять эти настройки в Unity через интеграцию с Python и Google Таблицами
 
 | Plugin | README |
 | ------ | ------ |
